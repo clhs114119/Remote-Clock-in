@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>19遠端簽到系統</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 450px; margin: 20px auto; padding: 20px; background: #eef2f5; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        button, select, input { padding: 12px; margin: 5px 0; width: 100%; box-sizing: border-box; font-size: 16px; border-radius: 6px; border: 1px solid #ccc; }
+        button { cursor: pointer; border: none; font-weight: bold; transition: background 0.2s; }
+        button:active { transform: scale(0.98); }
+        .grid-btn { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        
+        /* 狀態指示燈面板設計 */
+        .status-panel { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 20px; }
+        .status-box { flex: 1; padding: 12px; text-align: center; border-radius: 8px; font-weight: bold; color: white; font-size: 14px;}
+        .bg-gray { background: #95a5a6; }
+        .bg-red { background: #e74c3c; }
+        .bg-green { background: #2ecc71; }
+    </style>
+</head>
+<body>
+
+    <!-- 狀態指示燈面板 -->
+    <div class="status-panel">
+        <div id="webStatus" class="status-box bg-red">server: 斷線</div>
+        <div id="espStatus" class="status-box bg-gray">神秘小東東: 狀態未知</div>
+    </div>
+
+    <!-- 預設輸入區域 -->
+    <div class="card">
+        <h3>📂 選取座號</h3>
+        <select id="presetSelect">
+            <option value="">載入中...</option>
+        </select>
+        <button onclick="sendPreset()" style="background:#27ae60; color:white;">發送預設值</button>
+    </div>
+
+    <!-- 自訂輸入區域 -->
+    <div class="card">
+        <h3>⌨️️ 自訂輸入</h3>
+        <input type="text" id="customInput" placeholder="請輸入要打的字...">
+        <button onclick="sendCustom()" style="background:#3498db; color:white;">發送文字</button>
+    </div>
+
+    <!-- 鍵盤控制鍵區域 -->
+    <div class="card">
+        <h3>🕹️ 控制鍵</h3>
+        <div class="grid-btn">
+            <button onclick="sendCmd('KEY_ESC')" style="background:#e67e22; color:white;">ESC</button>
+            <button onclick="sendCmd('KEY_UP')" style="background:#bdc3c7;">⬆️</button>
+            <button onclick="sendCmd('KEY_TAB')" style="background:#9b59b6; color:white;">TAB</button>
+            
+            <button onclick="sendCmd('KEY_LEFT')" style="background:#bdc3c7;">⬅️</button>
+            <button onclick="sendCmd('KEY_DOWN')" style="background:#bdc3c7;">⬇️</button>
+            <button onclick="sendCmd('KEY_RIGHT')" style="background:#bdc3c7;">➡️</button>
+            
+            <div></div>
+            <button onclick="sendCmd('KEY_ENTER')" style="background:#e74c3c; color:white;">ENTER</button>
+            <div></div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. MQTT 設定與連線 ---
+        const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
+        const topicCmd = 'my_esp32s3zero_1145141919810_8964/hid/command'; 
+        const topicStatus = 'my_esp32s3zero_1145141919810_8964/hid/status'; // 用於接收硬體在線狀態
+        
+        const client = mqtt.connect(brokerUrl, {
+            clientId: 'web_client_' + Math.random().toString(16).substr(2, 8)
+        });
+
+        const webStatusDiv = document.getElementById('webStatus');
+        const espStatusDiv = document.getElementById('espStatus');
+
+        // MQTT 事件監聽
+        client.on('connect', () => {
+            webStatusDiv.textContent = '網頁雲端: 已連線';
+            webStatusDiv.className = 'status-box bg-green';
+            
+            // 連線後，訂閱硬體狀態 Topic
+            client.subscribe(topicStatus);
+        });
+
+        client.on('offline', () => {
+            webStatusDiv.textContent = '網頁雲端: 斷線中';
+            webStatusDiv.className = 'status-box bg-red';
+            // 網頁本身斷線時，硬體狀態也不可信任，改為灰色未知
+            espStatusDiv.textContent = '神秘小東東: 狀態未知';
+            espStatusDiv.className = 'status-box bg-gray';
+        });
+
+        // 接收 MQTT 訊息 (用於判斷 神秘小東東 是否在線上)
+        client.on('message', (topic, message) => {
+            if (topic === topicStatus) {
+                const status = message.toString();
+                if (status === 'online') {
+                    espStatusDiv.textContent = '神秘小東東: 上線待命';
+                    espStatusDiv.className = 'status-box bg-green';
+                } else if (status === 'offline') {
+                    espStatusDiv.textContent = '神秘小東東: 離線/未插電';
+                    espStatusDiv.className = 'status-box bg-red';
+                }
+            }
+        });
+
+        // --- 2. 讀取 JSON ---
+        fetch('commands.json')
+            .then(response => response.json())
+            .then(data => {
+                const select = document.getElementById('presetSelect');
+                select.innerHTML = ''; 
+                for (const [key, value] of Object.entries(data)) {
+                    const option = document.createElement('option');
+                    option.text = key;
+                    option.value = value;
+                    select.appendChild(option);
+                }
+            })
+            .catch(error => {
+                console.error('讀取 JSON 失敗:', error);
+                document.getElementById('presetSelect').innerHTML = '<option value="">讀取資料失敗</option>';
+            });
+
+        // --- 3. 發送指令邏輯 ---
+        function sendCmd(command) {
+            if (client.connected) {
+                client.publish(topicCmd, command);
+            } else {
+                alert("網頁尚未連線到雲端！");
+            }
+        }
+
+        function sendPreset() {
+            const val = document.getElementById('presetSelect').value;
+            if (!val) return;
+            sendCmd('TYPE:' + val);
+            setTimeout(() => sendCmd('KEY_ENTER'), 200);
+        }
+
+        function sendCustom() {
+            const input = document.getElementById('customInput');
+            if (!input.value) return;
+            sendCmd('TYPE:' + input.value);
+            input.value = ''; 
+        }
+    </script>
+</body>
+</html>
